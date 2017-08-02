@@ -25,7 +25,7 @@ msg = msgpack.packb([1, 2.23])
 resmsg = fun(msg)
 res = msgpack.unpackb(resmsg)
 
-print "Haskell said:", res
+print("Haskell said:", res)
 
 
 # Some shortcuts
@@ -41,7 +41,7 @@ def make_msgpack_fun(fun):
 # Now this is the only thing required
 fib = make_msgpack_fun(lib.fib_export)
 
-print "Haskell fib:", fib(13)
+print("Haskell fib:", fib(13))
 
 
 # def fib(n):
@@ -49,8 +49,8 @@ print "Haskell fib:", fib(13)
 #     return fib(n-1) + fib(n-2)
 
 sum = 0
-for x in xrange(100000):
+for x in range(100000):
     sum += fib(15)
-print sum
+print(sum)
 
 lib.hs_exit()
