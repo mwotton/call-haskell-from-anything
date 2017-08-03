@@ -32,12 +32,16 @@ module FFI.Anything.TypeUncurry.Msgpack (
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
+import           Data.ByteString.Unsafe (unsafeUseAsCStringLen)
+import           Data.Int (Int64)
 import           Data.Maybe (fromMaybe)
 import qualified Data.MessagePack as MSG
 import           Data.Proxy
-import           Data.Vector (Vector)
-import qualified Data.Vector as V
+import           Data.Storable.Endian (peekBE, pokeBE)
 import           Foreign.C
+import           Foreign.Marshal.Alloc (mallocBytes)
+import           Foreign.Marshal.Utils (copyBytes)
+import           Foreign.Ptr (castPtr, plusPtr)
 
 import FFI.Anything.TypeUncurry
 
@@ -47,23 +51,23 @@ import FFI.Anything.TypeUncurry
 -- We need this because we have to call 'parseArray' at the top-level
 -- 'MSG.MessagePack' instance, but not at each function argument step.
 class MessagePackRec l where
-  fromObjectRec :: Vector MSG.Object -> Maybe (TypeList l)
+  fromObjectRec :: (Monad m) => [MSG.Object] -> m (TypeList l)
 
 -- | When no more types need to be unpacked, we are done.
 instance MessagePackRec '[] where
-  fromObjectRec v | V.null v = Just Nil
-  fromObjectRec _            = Nothing
+  fromObjectRec v | null v = pure Nil
+  fromObjectRec _          = fail "fromObjectRec: passed object is not expected []"
 
 -- | Unpack one type by just parsing the next element.
 instance (MSG.MessagePack a, MessagePackRec l) => MessagePackRec (a ': l) where
-  fromObjectRec v | not (V.null v) = (:::) <$> MSG.fromObject (V.head v) <*> fromObjectRec (V.tail v)
-  fromObjectRec _                  = Nothing
+  fromObjectRec (x:xs) = (:::) <$> MSG.fromObject x <*> fromObjectRec xs
+  fromObjectRec _      = fail "fromObjectRec: passed object is not expected (x:xs)"
 
 -- | Parses a tuple of arbitrary size ('TypeList's) from a MessagePack array.
-getTypeListFromMsgpackArray :: forall l . (MessagePackRec l, ParamLength l) => MSG.Object -> Maybe (TypeList l)
+getTypeListFromMsgpackArray :: forall m l . (MessagePackRec l, ParamLength l, Monad m) => MSG.Object -> m (TypeList l)
 getTypeListFromMsgpackArray obj = case obj of
-    MSG.ObjectArray v | V.length v == len -> fromObjectRec v
-    _                                     -> Nothing
+    MSG.ObjectArray v | length v == len -> fromObjectRec v
+    _                                   -> fail "getTypeListFromMsgpackArray: wrong object length"
   where
     len = paramLength (Proxy :: Proxy l)
 
@@ -114,6 +118,17 @@ tryUncurryMsgpackIO f = \bs -> case MSG.unpack $ BSL.fromStrict bs of
   Just args -> Just $ BSL.toStrict . MSG.pack <$> (translate f $ args)
 
 
+-- | O(n). Makes a copy of the ByteString's contents into a malloc()ed area.
+-- You need to free() the returned string when you're done with it.
+byteStringToMallocedCStringWith64bitLength :: ByteString -> IO CString
+byteStringToMallocedCStringWith64bitLength bs =
+  unsafeUseAsCStringLen bs $ \(ptr, len) -> do
+    targetPtr <- mallocBytes (8 + len)
+    pokeBE (castPtr targetPtr) (fromIntegral len :: Int64)
+    copyBytes (targetPtr `plusPtr` 8) ptr len
+    return targetPtr
+
+
 -- * Exporting
 
 -- TODO implement via byteStringToCStringFunIO?
@@ -121,9 +136,10 @@ tryUncurryMsgpackIO f = \bs -> case MSG.unpack $ BSL.fromStrict bs of
 -- for use in the FFI.
 byteStringToCStringFun :: (ByteString -> ByteString) -> CString -> IO CString
 byteStringToCStringFun f cs = do
-  cs_bs <- BS.packCString cs
+  msgLength :: Int64 <- peekBE (castPtr cs)
+  cs_bs <- BS.packCStringLen (cs `plusPtr` 8, fromIntegral msgLength)
   let res_bs = f cs_bs
-  res_cs <- BS.useAsCString res_bs return
+  res_cs <- byteStringToMallocedCStringWith64bitLength res_bs
   return res_cs
 
 
@@ -131,9 +147,10 @@ byteStringToCStringFun f cs = do
 -- for use in the FFI.
 byteStringToCStringFunIO :: (ByteString -> IO ByteString) -> CString -> IO CString
 byteStringToCStringFunIO f cs = do
-  cs_bs <- BS.packCString cs
+  msgLength :: Int64 <- peekBE (castPtr cs)
+  cs_bs <- BS.packCStringLen (cs `plusPtr` 8, fromIntegral msgLength)
   res_bs <- f cs_bs
-  res_cs <- BS.useAsCString res_bs return
+  res_cs <- byteStringToMallocedCStringWith64bitLength res_bs
   return res_cs
 
 
